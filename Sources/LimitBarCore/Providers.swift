@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Security
 import LocalAuthentication
 
@@ -48,15 +49,19 @@ private struct ClaudeCredentials {
     let token: String
     let plan: String
     static func load(allowInteraction: Bool) throws -> ClaudeCredentials {
+        // Finder-launched apps don't inherit shell variables, so a custom profile can also be set with
+        // `defaults write local.yukai.limitbar claudeConfigDir <path>`.
         let override = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+            ?? UserDefaults.standard.string(forKey: "claudeConfigDir")
         let home = FileManager.default.homeDirectoryForCurrentUser
         let config = override.map { URL(fileURLWithPath: $0) } ?? home.appendingPathComponent(".claude")
         let file = config.appendingPathComponent(".credentials.json")
         if let data = try? Data(contentsOf: file), let credential = try? parse(data) { return credential }
-        // Custom profiles must never silently fall back to another account's global keychain entry.
-        guard override == nil else {
-            throw ProviderFailure(.authentication, "No valid Claude credentials in CLAUDE_CONFIG_DIR. Sign in to that profile and refresh.")
-        }
+        // Claude Code suffixes a custom profile's keychain entry with the first 8 hex digits of
+        // SHA-256(config dir), so a custom profile never falls back to the global entry.
+        let service = override.map { dir in
+            "Claude Code-credentials-" + SHA256.hash(data: Data(dir.utf8)).map { String(format: "%02x", $0) }.joined().prefix(8)
+        } ?? "Claude Code-credentials"
         let context = LAContext()
         context.interactionNotAllowed = !allowInteraction
         // Claude Code uses the legacy login keychain, whose ACL prompts do not honor
@@ -67,7 +72,7 @@ private struct ClaudeCredentials {
         defer { if !allowInteraction { SecKeychainSetUserInteractionAllowed(previousInteraction.boolValue) } }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
+            kSecAttrService as String: service,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true,
             kSecUseAuthenticationUI as String: allowInteraction ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail,
